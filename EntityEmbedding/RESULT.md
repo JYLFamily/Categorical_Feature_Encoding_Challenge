@@ -33,5 +33,6 @@
 
 |Activation|Full Fold AUC|Public AUC|Private AUC|
 |------|------|------|------|
+|relu|0.79902|0.80445|
 |sigmoid|0.80267|0.80711||
 |tanh|0.80194|0.80734|
