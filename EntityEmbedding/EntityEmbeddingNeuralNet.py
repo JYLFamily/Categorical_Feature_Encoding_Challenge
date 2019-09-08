@@ -160,7 +160,8 @@ class EntityEmbeddingNeuralNet(object):
             gc.collect()
 
     def data_write(self):
-        print("Fold all prediction trn auc: %.5f" % (roc_auc_score(self.__train_label, self.__val_preds)))
+        print("Fold all prediction trn auc: %.5f" % (
+            roc_auc_score(self.__train_label, expit(self.__val_preds))))
 
         self.__test_index["target"] = expit(self.__sub_preds.reshape((-1,)))
         self.__test_index.to_csv(os.path.join(self.__output_path, "sample_submission.csv"), index=False)
@@ -168,8 +169,8 @@ class EntityEmbeddingNeuralNet(object):
 
 if __name__ == "__main__":
     eenn = EntityEmbeddingNeuralNet(
-        input_path="E:\\Kaggle\\Categorical Feature Encoding Challenge",
-        output_path="E:\\Kaggle\\Categorical Feature Encoding Challenge"
+        input_path="E:\\Kaggle\\Categorical_Feature_Encoding_Challenge",
+        output_path="E:\\Kaggle\\Categorical_Feature_Encoding_Challenge"
     )
     eenn.data_read()
     eenn.data_prepare()
