@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tqdm import tqdm
-from scipy.special import logit, expit
+from scipy.special import expit
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import StratifiedKFold
@@ -14,6 +14,28 @@ np.random.seed(7)
 tf.random.set_seed(7)
 pd.set_option("max_row", None)
 pd.set_option("max_columns", None)
+
+
+def make_input_fn(feature, label=None, batch_size=None, num_epochs=None):
+    feature = feature.copy(deep=True)
+    label = None if label is None else label.copy(deep=True)
+
+    def input_function():
+        if label is None:  # val tes
+            ds = tf.data.Dataset.from_tensor_slices((dict(feature)))
+            ds = ds.batch(feature.shape[0])
+            ds = ds.repeat(1)
+
+            return ds
+        else:  # train
+            ds = tf.data.Dataset.from_tensor_slices((dict(feature), label))
+            ds = ds.batch(batch_size)
+            ds = ds.repeat(num_epochs)
+            ds = ds.shuffle(buffer_size=len(feature))
+
+            return ds
+
+    return input_function
 
 
 class WideAndDeepNeuralNet(object):
@@ -25,8 +47,9 @@ class WideAndDeepNeuralNet(object):
         self.__train_feature, self.__train_label = [None for _ in range(2)]
         self.__test_feature, self.__test_index = [None for _ in range(2)]  # test_index dataframe
 
-        self.__columns = list()
-        self.__columns_counts = dict()
+        self.__columns = None
+        self.__columns_counts = None
+        self.__feature_column = None
 
         # blending
         self.__folds = None
@@ -34,9 +57,6 @@ class WideAndDeepNeuralNet(object):
         self.__sub_preds = None
 
         # model
-        self.__wide_columns = []
-        self.__deep_columns = []
-
         self.__model = None
 
     def data_read(self):
@@ -52,6 +72,7 @@ class WideAndDeepNeuralNet(object):
         gc.collect()
 
         self.__columns = self.__train_feature.columns.tolist()
+        self.__columns_counts = dict()
 
     def model_fit_predict(self):
         # blending
@@ -108,48 +129,34 @@ class WideAndDeepNeuralNet(object):
 
                     self.__columns_counts[col] = encoder.classes_.tolist()
 
-            trn_input = tf.compat.v1.estimator.inputs.pandas_input_fn(
-                x=trn_x,
-                y=trn_y,
-                batch_size=512,
-                num_epochs=1,
-                shuffle=True
-            )
-            val_input = tf.compat.v1.estimator.inputs.pandas_input_fn(
-                x=val_x,
-                batch_size=val_x.shape[0],
-                shuffle=False
-            )
-            tes_input = tf.compat.v1.estimator.inputs.pandas_input_fn(
-                x=tes_x,
-                batch_size=tes_x.shape[0],
-                shuffle=False
-            )
+            trn_input = make_input_fn(trn_x, trn_y, batch_size=512, num_epochs=5)
+            val_input = make_input_fn(val_x, None)
+            tes_input = make_input_fn(tes_x, None)
 
+            self.__feature_column = list()
             for column, count in self.__columns_counts.items():
                 categorical_column = tf.feature_column.categorical_column_with_vocabulary_list(
                     key=column, vocabulary_list=count)
+                self.__feature_column.append(tf.feature_column.indicator_column(categorical_column))
 
-                self.__wide_columns.append(tf.feature_column.indicator_column(categorical_column))
-                self.__deep_columns.append(tf.feature_column.embedding_column(
-                    categorical_column, dimension=4 * int(np.round(np.log2(len(count))))))
-
-            self.__model = tf.estimator.DNNLinearCombinedClassifier(
-                linear_feature_columns=self.__wide_columns,
-                dnn_feature_columns=self.__deep_columns,
-                dnn_hidden_units=[1],
-                dnn_activation_fn=tf.nn.sigmoid
-            )
+            self.__model = tf.estimator.LinearClassifier(feature_columns=self.__feature_column)
             self.__model.train(input_fn=trn_input)
 
-            pred_val, pred_tes = [np.array([]) for _ in range(2)]
+            pred_trn, pred_val, pred_tes = [np.array([]) for _ in range(3)]
+            # pred_trn
+            for element in self.__model.predict(input_fn=trn_input):
+                pred_trn = np.append(pred_trn, element["logits"])
+            # pred val
             for element in self.__model.predict(input_fn=val_input):
                 pred_val = np.append(pred_val, element["logits"])
-
-            print("Fold %i prediction trn auc: %.5f" % (n_fold, roc_auc_score(val_y.tolist(), expit(pred_val.tolist()))))
-
+            # pred tes
             for element in self.__model.predict(input_fn=tes_input):
                 pred_tes = np.append(pred_tes, element["logits"])
+
+            print(
+                "Fold %i prediction trn auc: %.5f" % (n_fold, roc_auc_score(trn_y.tolist(), expit(pred_trn))))
+            print(
+                "Fold %i prediction val auc: %.5f" % (n_fold, roc_auc_score(val_y.tolist(), expit(pred_val))))
 
             self.__val_preds[val_idx] += pred_val
             self.__sub_preds += pred_tes / self.__folds.n_splits
