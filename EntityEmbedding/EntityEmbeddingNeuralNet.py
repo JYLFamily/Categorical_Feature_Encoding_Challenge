@@ -35,7 +35,7 @@ class EntityEmbeddingNeuralNet(object):
 
         # model fit predict
         self.__folds = None
-        self.__val_preds = None
+        self.__oof_preds = None
         self.__sub_preds = None
 
         self.__neural_net_util = importlib.import_module("NeuralNetUtil")
@@ -53,12 +53,16 @@ class EntityEmbeddingNeuralNet(object):
         del self.__train, self.__test
         gc.collect()
 
+        self.__train_feature = self.__train_feature[
+            ["ord_0", "ord_1", "ord_2", "ord_3", "ord_4", "ord_5", "day", "month"]].copy(deep=True)
+        self.__test_feature = self.__test_feature[
+            ["ord_0", "ord_1", "ord_2", "ord_3", "ord_4", "ord_5", "day", "month"]].copy(deep=True)
         self.__columns = self.__train_feature.columns.tolist()
 
     def model_fit_predict(self):
         # blending
-        self.__folds = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
-        self.__val_preds = np.zeros(shape=(self.__train_feature.shape[0],))
+        self.__folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=7)
+        self.__oof_preds = np.zeros(shape=(self.__train_feature.shape[0],))
         self.__sub_preds = np.zeros(shape=(self.__test_feature.shape[0],))
 
         for n_fold, (trn_idx, val_idx) in enumerate(self.__folds.split(
@@ -150,7 +154,7 @@ class EntityEmbeddingNeuralNet(object):
             )
 
             pred_vals = self.__net.predict(val_feature_for_model).reshape((-1,))  # 2D shape -> 1D shape
-            self.__val_preds[val_idx] += logit(pred_vals)
+            self.__oof_preds[val_idx] += logit(pred_vals)
 
             pred_test = self.__net.predict(tes_feature_for_model).reshape((-1,))
             self.__sub_preds += logit(pred_test) / self.__folds.n_splits
@@ -161,7 +165,7 @@ class EntityEmbeddingNeuralNet(object):
 
     def data_write(self):
         print("Fold all prediction trn auc: %.5f" % (
-            roc_auc_score(self.__train_label, expit(self.__val_preds))))
+            roc_auc_score(self.__train_label, expit(self.__oof_preds))))
 
         self.__test_index["target"] = expit(self.__sub_preds.reshape((-1,)))
         self.__test_index.to_csv(os.path.join(self.__output_path, "sample_submission.csv"), index=False)
