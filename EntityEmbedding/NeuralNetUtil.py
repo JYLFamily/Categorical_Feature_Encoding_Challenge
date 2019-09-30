@@ -15,11 +15,12 @@ def network(columns_counts, output_layer_bias):
     embedding_layers = list()
 
     for col, num in columns_counts.items():
-        input_layer = tf.keras.layers.Input(shape=(), name=col + "_input")
+        input_layer = tf.keras.layers.Input(shape=(1,), name=col + "_input")
         embedding_layer = tf.keras.layers.Embedding(
             input_dim=int(num),  # must int
             output_dim=mul(int(np.round(np.log2(num))), 4),  # must int
             embeddings_initializer=tf.keras.initializers.TruncatedNormal(mean=0, stddev=1/np.sqrt(num), seed=7),
+            embeddings_regularizer=tf.keras.regularizers.l2(1e-6),
             input_length=1,
             name=col + "_embedding")(input_layer)
         embedding_layer = (
