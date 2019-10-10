@@ -2,40 +2,65 @@
 
 import os
 import gc
+import importlib
 import numpy as np
 import pandas as pd
-import tensorflow as tf
 from tqdm import tqdm
-from scipy.special import expit
+from collections import OrderedDict
+from scipy.special import logit, expit
 from sklearn.metrics import roc_auc_score
-from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+from keras.metrics import AUC
+from keras.utils import Sequence
+from keras.optimizers import Adam
+from keras.callbacks import EarlyStopping
 np.random.seed(7)
-tf.random.set_seed(7)
 pd.set_option("max_row", None)
 pd.set_option("max_columns", None)
 
 
-def make_input_fn(feature, label=None, batch_size=None, num_epochs=None):
-    feature = feature.copy(deep=True)
-    label = None if label is None else label.copy(deep=True)
+class FitGenerator(Sequence):
+    def __init__(self, feature, label, encoder, shuffle, batch_size):
+        self.__index = np.arange(feature.shape[0])
+        self.__feature, self.__label = feature, label
+        self.__encoder, self.__shuffle = encoder, shuffle
+        self.__batch_size = batch_size
 
-    def input_function():
-        if label is None:  # val tes
-            ds = tf.data.Dataset.from_tensor_slices((dict(feature)))
-            ds = ds.batch(feature.shape[0])
-            ds = ds.repeat(1)
+    def __len__(self):
+        return self.__feature.shape[0] // self.__batch_size
 
-            return ds
-        else:  # train
-            ds = tf.data.Dataset.from_tensor_slices((dict(feature), label))
-            ds = ds.batch(batch_size)
-            ds = ds.repeat(num_epochs)
-            ds = ds.shuffle(buffer_size=len(feature))
+    def __getitem__(self, idx):
+        index = self.__index[idx * self.__batch_size: (idx + 1) * self.__batch_size]
 
-            return ds
+        batch_feature, batch_label = [self.__encoder.transform(self.__feature[index, :15])], self.__label[index]
+        for col in range(15, 23):
+            batch_feature.append(self.__feature[index, col])
 
-    return input_function
+        return batch_feature, batch_label
+
+    def on_epoch_end(self):
+        if self.__shuffle:
+            np.random.shuffle(self.__index)
+
+
+class PredictGenerator(Sequence):
+    def __init__(self, feature, encoder):
+        self.__index = np.arange(feature.shape[0])
+        self.__feature = feature
+        self.__encoder = encoder
+
+    def __len__(self):
+        return self.__feature.shape[0]
+
+    def __getitem__(self, idx):
+        index = self.__index[idx: (idx + 1)]
+
+        batch_feature = [self.__encoder.transform(self.__feature[index, :15])]
+        for col in range(15, 23):
+            batch_feature.append(self.__feature[index, col])
+
+        return batch_feature
 
 
 class WideAndDeepNeuralNet(object):
@@ -47,17 +72,16 @@ class WideAndDeepNeuralNet(object):
         self.__train_feature, self.__train_label = [None for _ in range(2)]
         self.__test_feature, self.__test_index = [None for _ in range(2)]  # test_index dataframe
 
-        self.__columns = None
-        self.__columns_counts = None
-        self.__feature_column = None
+        self.__columns = list()
+        self.__columns_counts = OrderedDict()  # each fold clear
 
-        # blending
+        # model fit predict
         self.__folds = None
         self.__val_preds = None
         self.__sub_preds = None
 
-        # model
-        self.__model = None
+        self.__neural_net_util = importlib.import_module("NeuralNetUtil")
+        self.__net, self.__early_stopping = [None for _ in range(2)]
 
     def data_read(self):
         self.__train = pd.read_csv(os.path.join(self.__input_path, "train.csv"))
@@ -72,11 +96,10 @@ class WideAndDeepNeuralNet(object):
         gc.collect()
 
         self.__columns = self.__train_feature.columns.tolist()
-        self.__columns_counts = dict()
 
     def model_fit_predict(self):
         # blending
-        self.__folds = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
+        self.__folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=7)
         self.__val_preds = np.zeros(shape=(self.__train_feature.shape[0],))
         self.__sub_preds = np.zeros(shape=(self.__test_feature.shape[0],))
 
@@ -123,46 +146,69 @@ class WideAndDeepNeuralNet(object):
 
                     encoder = LabelEncoder()
                     encoder.fit(trn_x[col])
-                    trn_x[col] = encoder.transform(trn_x[col]).astype(str)
-                    val_x[col] = encoder.transform(val_x[col]).astype(str)
-                    tes_x[col] = encoder.transform(tes_x[col]).astype(str)
+                    trn_x[col] = encoder.transform(trn_x[col])
+                    val_x[col] = encoder.transform(val_x[col])
+                    tes_x[col] = encoder.transform(tes_x[col])
 
-                    self.__columns_counts[col] = encoder.classes_.tolist()
+                    self.__columns_counts[col] = len(encoder.classes_)
 
-            trn_input = make_input_fn(trn_x, trn_y, batch_size=512, num_epochs=5)
-            val_input = make_input_fn(val_x, None)
-            tes_input = make_input_fn(tes_x, None)
+            # data
+            trn_x, val_x, tes_x = trn_x.to_numpy(), val_x.to_numpy(), tes_x.to_numpy()
+            trn_y, val_y = trn_y.to_numpy(), val_y.to_numpy()
+            encoder = OneHotEncoder(categories="auto", sparse=False)
+            encoder.fit(trn_x[:, :15])
 
-            self.__feature_column = list()
-            for column, count in self.__columns_counts.items():
-                categorical_column = tf.feature_column.categorical_column_with_vocabulary_list(
-                    key=column, vocabulary_list=count)
-                self.__feature_column.append(tf.feature_column.indicator_column(categorical_column))
+            # neural net
+            self.__net = self.__neural_net_util.network(
+                columns_counts=self.__columns_counts,
+                output_layer_bias=trn_y.mean()
+            )
+            self.__net.compile(loss="binary_crossentropy", optimizer=Adam(), metrics=[AUC()])
+            self.__net.fit_generator(
+                generator=FitGenerator(trn_x, trn_y, encoder, True, 32),
+                steps_per_epoch=trn_x.shape[0] // 32,
+                epochs=75,
+                verbose=2,
+                callbacks=[
+                    EarlyStopping(
+                        patience=5,
+                        restore_best_weights=True
+                    )],
+                validation_data=FitGenerator(val_x, val_y, encoder, False, 1),
+                validation_steps=val_x.shape[0],
+                workers=1,
+                use_multiprocessing=False
+            )
 
-            self.__model = tf.estimator.LinearClassifier(feature_columns=self.__feature_column)
-            self.__model.train(input_fn=trn_input)
+            pred_trns = self.__net.predict_generator(
+                generator=PredictGenerator(trn_x, encoder),
+                steps=trn_x.shape[0],
+                workers=1,
+                use_multiprocessing=False).reshape((-1,))
+            pred_vals = self.__net.predict_generator(
+                generator=PredictGenerator(val_x, encoder),
+                steps=val_x.shape[0],
+                workers=1,
+                use_multiprocessing=False).reshape((-1,))
+            pred_test = self.__net.predict_generator(
+                generator=PredictGenerator(tes_x, encoder),
+                steps=tes_x.shape[0],
+                workers=1,
+                use_multiprocessing=False).reshape((-1,))
 
-            pred_trn, pred_val, pred_tes = [np.array([]) for _ in range(3)]
-            # pred_trn
-            for element in self.__model.predict(input_fn=trn_input):
-                pred_trn = np.append(pred_trn, element["logits"])
-            # pred val
-            for element in self.__model.predict(input_fn=val_input):
-                pred_val = np.append(pred_val, element["logits"])
-            # pred tes
-            for element in self.__model.predict(input_fn=tes_input):
-                pred_tes = np.append(pred_tes, element["logits"])
+            self.__neural_net_util.network_preformance(
+                n_fold=n_fold,
+                pred_trn=pred_trns,
+                pred_val=pred_vals,
+                trn_label=trn_y,
+                val_label=val_y
+            )
 
-            print(
-                "Fold %i prediction trn auc: %.5f" % (n_fold, roc_auc_score(trn_y.tolist(), expit(pred_trn))))
-            print(
-                "Fold %i prediction val auc: %.5f" % (n_fold, roc_auc_score(val_y.tolist(), expit(pred_val))))
-
-            self.__val_preds[val_idx] += pred_val
-            self.__sub_preds += pred_tes / self.__folds.n_splits
+            self.__val_preds[val_idx] += logit(pred_vals)
+            self.__sub_preds += logit(pred_test) / self.__folds.n_splits
 
             self.__columns_counts.clear()
-            del trn_x, val_x, tes_x, trn_y, val_y, self.__model
+            del trn_x, val_x, tes_x, trn_y, val_y
             gc.collect()
 
     def data_write(self):
@@ -173,11 +219,11 @@ class WideAndDeepNeuralNet(object):
 
 
 if __name__ == "__main__":
-    wadnn = WideAndDeepNeuralNet(
+    wadn = WideAndDeepNeuralNet(
         input_path="E:\\Kaggle\\Categorical_Feature_Encoding_Challenge",
         output_path="E:\\Kaggle\\Categorical_Feature_Encoding_Challenge"
     )
-    wadnn.data_read()
-    wadnn.data_prepare()
-    wadnn.model_fit_predict()
-    wadnn.data_write()
+    wadn.data_read()
+    wadn.data_prepare()
+    wadn.model_fit_predict()
+    wadn.data_write()
