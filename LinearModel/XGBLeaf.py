@@ -47,7 +47,7 @@ class XGBLeaf(object):
             estimator = Pipeline([
                 ("ENCODER", ColumnTransformer([
                     ("ORD_ENCODER", OrdinalEncoder(categories="auto"), ord_encoder_columns),
-                    ("TAR_ENCODER", TargetEncoder(cols=tar_encoder_columns), tar_encoder_columns),
+                    ("TAR_ENCODER", TargetEncoder(cols=tar_encoder_columns), tar_encoder_columns)
                 ], remainder="drop")),
                 ("LGBMCLF", LGBMClassifier(
                     max_depth=1,
